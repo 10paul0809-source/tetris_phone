@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Tetris — Mobile</title>
+  <style>
+    :root{
+      --bg:#111;
+      --panel-bg: rgba(255,255,255,0.04);
+      --btn-bg: rgba(255,255,255,0.06);
+      --accent: #FF8E0D;
+    }
+    html,body{
+      height:100%;
+      margin:0;
+      background:var(--bg);
+      color:#fff;
+      font-family:system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;
+      -webkit-tap-highlight-color: transparent;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:12px;
+      box-sizing:border-box;
+    }
+
+    .container{
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+      align-items:center;
+      width:100%;
+      max-width:420px;
+    }
+
+    .game-wrap{
+      position:relative;
+      display:flex;
+      gap:12px;
+      align-items:flex-start;
+      width:100%;
+      justify-content:center;
+    }
+
+    canvas{
+      background:#000;
+      border:2px solid #fff;
+      image-rendering:pixelated;
+      touch-action:none; /* prevent default browser gestures on canvas */
+      display:block;
+    }
+
+    /* Right panel: score / controls */
+    .panel{
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      background:var(--panel-bg);
+      padding:10px;
+      border-radius:8px;
+      min-width:120px;
+      max-width:140px;
+      box-sizing:border-box;
+    }
+    .score{
+      font-size:14px;
+    }
+    .controls{
+      display:flex;
+      gap:6px;
+      flex-wrap:wrap;
+    }
+    button{
+      background:var(--btn-bg);
+      color:#fff;
+      border:0;
+      padding:8px 10px;
+      border-radius:6px;
+      font-size:14px;
+      cursor:pointer;
+    }
+    button:active{ transform:translateY(1px); }
+
+    /* Mobile touch buttons overlay (bottom) */
+    .touch-controls{
+      display:flex;
+      gap:8px;
+      width:100%;
+      justify-content:center;
+      margin-top:8px;
+      pointer-events:auto;
+    }
+    .touch-btn{
+      flex:1;
+      min-width:56px;
+      background:rgba(255,255,255,0.06);
+      border-radius:10px;
+      padding:10px;
+      text-align:center;
+      user-select:none;
+      -webkit-user-select:none;
+      font-size:18px;
+      color:#fff;
+    }
+
+    .overlay-message{
+      position:absolute;
+      inset:0;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      background:linear-gradient(180deg, rgba(0,0,0,0.6), rgba(0,0,0,0.4));
+      font-size:22px;
+      pointer-events:none;
+    }
+
+    @media (max-width:420px){
+      .panel{ display:none; } /* hide side panel on small screens */
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="game-wrap">
+      <canvas id="tetris"></canvas>
+
+      <div class="panel" aria-hidden="true">
+        <div class="score">Score: <span id="score">0</span></div>
+        <div class="score">High: <span id="high">0</span></div>
+        <div class="controls">
+          <button id="btn-pause">Pause</button>
+          <button id="btn-restart">Restart</button>
+          <button id="btn-sound">Sound On</button>
+        </div>
+        <div style="font-size:12px;color:#ddd;margin-top:6px;">Tap canvas to rotate. Swipe to move. Down swipe = hard drop.</div>
+      </div>
+    </div>
+
+    <div class="touch-controls" id="touchControls" aria-hidden="false">
+      <div class="touch-btn" id="btn-left">◀︎</div>
+      <div class="touch-btn" id="btn-rotate">⟳</div>
+      <div class="touch-btn" id="btn-right">▶︎</div>
+      <div class="touch-btn" id="btn-drop">↓</div>
+    </div>
+  </div>
+
+  <script>
+  (function(){
+    // Basic Tetris adapted for mobile:
+    // - responsive canvas sizing with devicePixelRatio
+    // - pointer/touch gesture handling (tap rotate, swipe move/hard-drop)
+    // - virtual buttons
+    // - requestAnimationFrame timing
+    // - simple scoring & high-score via localStorage
+
+    // --- Configuration ---
+    const COLS = 10, ROWS = 20;
+    const START_DROP_INTERVAL = 1000; // ms per row at level 0
+    const SOFT_DROP_MULT = 0.25;
+    const HARD_DROP_STEP_MS = 0; // immediate
+    const SWIPE_THRESHOLD = 24; // px to count as a swipe
+    const TAP_MAX_DURATION = 250; // ms
+    const LONGPRESS_MS = 350; // for soft drop via long press if desired
+
+    // --- Canvas setup (responsive) ---
+    const canvas = document.getElementById('tetris');
+    const ctx = canvas.getContext('2d');
+    let blockSize = 20; // logical block size in CSS pixels (will be recomputed)
+    function resizeCanvas(){
+      // choose blockSize so that the whole board fits comfortably
+      const availW = Math.min(window.innerWidth - 24, 420); // container padding
+      const availH = window.innerHeight - 160; // leave room for controls
+      const sizeW = Math.floor(availW / COLS);
+      const sizeH = Math.floor(availH / ROWS);
+      blockSize = Math.max(8, Math.min(sizeW, sizeH)); // minimum for small screens
+
+      const dpr = window.devicePixelRatio || 1;
+      canvas.style.width = (COLS * blockSize) + 'px';
+      canvas.style.height = (ROWS * blockSize) + 'px';
+      canvas.width = COLS * blockSize * dpr;
+      canvas.height = ROWS * blockSize * dpr;
+      ctx.setTransform(dpr * blockSize, 0, 0, dpr * blockSize, 0, 0); // scale logical units to CSS pixels * DPR
+      draw(); // redraw immediately
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+    // --- Game state ---
+    function createMatrix(w,h){
+      const m = [];
+      for(let y=0;y<h;y++) m.push(new Array(w).fill(0));
+      return m;
+    }
+    const arena = createMatrix(COLS, ROWS);
+
+    const colors = [ null,'#FF0D72','#0DC2FF','#0DFF72','#F538FF','#FF8E0D','#FFE138','#3877FF' ];
+    function createPiece(type){
+      if(type==='T') return [[0,1,0],[1,1,1],[0,0,0]];
+      if(type==='O') return [[2,2],[2,2]];
+      if(type==='L') return [[0,0,3],[3,3,3],[0,0,0]];
+      if(type==='J') return [[4,0,0],[4,4,4],[0,0,0]];
+      if(type==='I') return [[0,0,0,0],[5,5,5,5],[0,0,0,0],[0,0,0,0]];
+      if(type==='S') return [[0,6,6],[6,6,0],[0,0,0]];
+      if(type==='Z') return [[7,7,0],[0,7,7],[0,0,0]];
+    }
+
+    const player = { pos:{x:0,y:0}, matrix:null };
+    let dropInterval = START_DROP_INTERVAL;
+    let dropCounter = 0;
+    let lastTime = 0;
+    let paused = false;
+    let score = 0;
+    const scoreEl = document.getElementById('score');
+    const highEl = document.getElementById('high');
+    const SOUND_KEY = 'tetris_sound';
+    const HIGH_KEY = 'tetris_highscore';
+    let soundOn = JSON.parse(localStorage.getItem(SOUND_KEY) || 'true');
+
+    // --- Utilities ---
+    function collide(arena, player){
+      const m = player.matrix, o = player.pos;
+      for(let y=0;y<m.length;y++){
+        for(let x=0;x<m[y].length;x++){
+          if(m[y][x]!==0){
+            const ay = y+o.y, ax = x+o.x;
+            if(!arena[ay] || arena[ay][ax] !== 0) return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function merge(arena, player){
+      player.matrix.forEach((row,y)=>{
+        row.forEach((val,x)=>{
+          if(val!==0){
+            arena[y + player.pos.y][x + player.pos.x] = val;
+          }
+        });
+      });
+    }
+
+    function rotate(matrix, dir){
+      // transpose
+      for(let y=0;y<matrix.length;y++){
+        for(let x=0;x<y;x++){
+          [matrix[x][y], matrix[y][x]] = [matrix[y][x], matrix[x][y]];
+        }
+      }
+      if(dir>0) matrix.forEach(row => row.reverse()); // cw
+      else matrix.reverse(); // ccw
+    }
+
+    function drawMatrix(matrix, offset){
+      matrix.forEach((row,y)=>{
+        row.forEach((val,x)=>{
+          if(val!==0){
+            ctx.fillStyle = colors[val];
+            ctx.fillRect(x + offset.x, y + offset.y, 1, 1);
+            // simple stroke
+            ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+            ctx.lineWidth = 0.06;
+            ctx.strokeRect(x+offset.x+0.03, y+offset.y+0.03, 0.94, 0.94);
+          }
+        });
+      });
+    }
+
+    function draw(){
+      // clear (logical units)
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0,0,COLS,ROWS);
+      drawMatrix(arena, {x:0,y:0});
+      if(player.matrix) drawMatrix(player.matrix, player.pos);
+    }
+
+    // Row sweep & scoring (simple)
+    function sweepRows(){
+      let rowsCleared = 0;
+      outer: for(let y=ROWS-1;y>=0;--y){
+        for(let x=0;x<COLS;++x){
+          if(arena[y][x]===0) continue outer;
+        }
+        // remove row
+        arena.splice(y,1);
+        arena.unshift(new Array(COLS).fill(0));
+        rowsCleared++;
+        y++; // recheck same index
+      }
+      if(rowsCleared>0){
+        // simple scoring: 100 * 2^(n-1)
+        score += 100 * (2**(rowsCleared-1));
+        updateScore();
+      }
+    }
+
+    function updateScore(){
+      scoreEl.textContent = score;
+      const high = Math.max(score, Number(localStorage.getItem(HIGH_KEY) || 0));
+      localStorage.setItem(HIGH_KEY, String(high));
+      highEl.textContent = high;
+    }
+
+    function resetPlayer(){
+      const pieces = 'TJLOSZI';
+      player.matrix = createPiece(pieces[Math.floor(Math.random()*pieces.length)]);
+      player.pos.y = 0;
+      player.pos.x = (COLS / 2 | 0) - (player.matrix[0].length / 2 | 0);
+
+      if(collide(arena, player)){
+        // game over - clear arena and reset score
+        for(let y=0;y<ROWS;y++) arena[y].fill(0);
+        const prevHigh = Number(localStorage.getItem(HIGH_KEY) || 0);
+        if(score > prevHigh) localStorage.setItem(HIGH_KEY, String(score));
+        score = 0;
+        updateScore();
+      }
+    }
+
+    // rotation with basic wall kick
+    function rotatePlayer(dir){
+      const posX = player.pos.x;
+      let offset = 1;
+      rotate(player.matrix, dir);
+      while(collide(arena, player)){
+        player.pos.x += offset;
+        offset = -(offset + (offset>0?1:-1));
+        if(Math.abs(offset) > player.matrix[0].length){
+          // revert
+          rotate(player.matrix, -dir);
+          player.pos.x = posX;
+          return;
+        }
+      }
+    }
+
+    function playerDrop(isHard=false){
+      if(isHard){
+        // hard drop: drop until collision
+        while(!collide(arena, player)){
+          player.pos.y++;
+        }
+        player.pos.y--;
+        merge(arena, player);
+        sweepRows();
+        resetPlayer();
+      } else {
+        player.pos.y++;
+        if(collide(arena, player)){
+          player.pos.y--;
+          merge(arena, player);
+          sweepRows();
+          resetPlayer();
+        }
+      }
+    }
+
+    function playerMove(dir){
+      player.pos.x += dir;
+      if(collide(arena, player)) player.pos.x -= dir;
+    }
+
+    // --- Input: pointer/touch gestures + buttons ---
+    // Use Pointer Events for wide support
+    const canvasEl = canvas;
+    let pointerStart = null;
+    let pointerMoved = false;
+    let longPressTimer = null;
+
+    canvasEl.addEventListener('pointerdown', (e)=>{
+      e.preventDefault();
+      pointerStart = {x:e.clientX, y:e.clientY, t:performance.now()};
+      pointerMoved = false;
+      // start longpress for soft-drop (optional)
+      longPressTimer = setTimeout(()=>{
+        // start soft-drop while held
+        softDropStart();
+      }, LONGPRESS_MS);
+    });
+
+    canvasEl.addEventListener('pointermove', (e)=>{
+      if(!pointerStart) return;
+      const dx = e.clientX - pointerStart.x;
+      const dy = e.clientY - pointerStart.y;
+      if(Math.abs(dx) > 6 || Math.abs(dy) > 6) pointerMoved = true;
+
+      // horizontal move threshold -> move once per threshold
+      // We'll implement by moving and resetting start.x when a threshold reached
+      if(Math.abs(dx) >= SWIPE_THRESHOLD){
+        const steps = Math.floor(dx / SWIPE_THRESHOLD);
+        if(steps > 0) {
+          playerMove(1);
+          pointerStart.x += SWIPE_THRESHOLD;
+        } else {
+          playerMove(-1);
+          pointerStart.x -= SWIPE_THRESHOLD;
+        }
+        draw();
+      }
+
+      // vertical drag => soft drop while dragging down
+      if(dy >= SWIPE_THRESHOLD){
+        // simple soft drop one step per threshold
+        playerDrop(false);
+        pointerStart.y += SWIPE_THRESHOLD;
+        draw();
+      }
+    });
+
+    canvasEl.addEventListener('pointerup', (e)=>{
+      clearTimeout(longPressTimer);
+      softDropStop();
+      if(!pointerStart) return;
+      const dt = performance.now() - pointerStart.t;
+      const dx = e.clientX - pointerStart.x;
+      const dy = e.clientY - pointerStart.y;
+      pointerStart = null;
+
+      // If quick downward swipe -> hard drop
+      if(dy > SWIPE_THRESHOLD && dt < 350){
+        playerDrop(true);
+        draw();
+        return;
+      }
+
+      // If tap (short and little movement) -> rotate
+      if(!pointerMoved && dt < TAP_MAX_DURATION){
+        rotatePlayer(1);
+        draw();
+        return;
+      }
+
+      // Otherwise nothing special (moves handled during move)
+    });
+
+    canvasEl.addEventListener('pointercancel', (e)=>{
+      clearTimeout(longPressTimer);
+      pointerStart = null;
+      softDropStop();
+    });
+
+    // Virtual buttons
+    document.getElementById('btn-left').addEventListener('touchstart', (e)=>{ e.preventDefault(); playerMove(-1); draw();});
+    document.getElementById('btn-right').addEventListener('touchstart', (e)=>{ e.preventDefault(); playerMove(1); draw();});
+    document.getElementById('btn-rotate').addEventListener('touchstart', (e)=>{ e.preventDefault(); rotatePlayer(1); draw();});
+    document.getElementById('btn-drop').addEventListener('touchstart', (e)=>{ e.preventDefault(); playerDrop(true); draw();});
+
+    // Buttons in panel
+    document.getElementById('btn-pause').addEventListener('click', ()=>{
+      paused = !paused;
+      document.getElementById('btn-pause').textContent = paused ? 'Resume' : 'Pause';
+      if(!paused){
+        lastTime = performance.now();
+        update(lastTime);
+      }
+    });
+    document.getElementById('btn-restart').addEventListener('click', ()=>{
+      for(let y=0;y<ROWS;y++) arena[y].fill(0);
+      score = 0;
+      updateScore();
+      resetPlayer();
+      draw();
+    });
+    const soundBtn = document.getElementById('btn-sound');
+    function updateSoundUI(){ soundBtn.textContent = soundOn ? 'Sound On' : 'Sound Off'; }
+    soundBtn.addEventListener('click', ()=>{ soundOn = !soundOn; localStorage.setItem(SOUND_KEY, JSON.stringify(soundOn)); updateSoundUI(); });
+    updateSoundUI();
+
+    // Soft drop control while long-press
+    let softDropIntervalId = null;
+    function softDropStart(){
+      if(softDropIntervalId) return;
+      softDropIntervalId = setInterval(()=>{
+        playerDrop(false);
+        draw();
+      }, Math.max(50, START_DROP_INTERVAL * SOFT_DROP_MULT));
+    }
+    function softDropStop(){
+      if(softDropIntervalId){
+        clearInterval(softDropIntervalId);
+        softDropIntervalId = null;
+      }
+    }
+
+    // --- Game loop (requestAnimationFrame with delta) ---
+    function update(time = 0){
+      if(paused) return;
+      const delta = time - lastTime;
+      lastTime = time;
+      dropCounter += delta;
+      if(dropCounter > dropInterval){
+        playerDrop(false);
+        dropCounter = 0;
+      }
+      draw();
+      requestAnimationFrame(update);
+    }
+
+    // init
+    resizeCanvas();
+    window.requestAnimationFrame((t)=>{
+      lastTime = t;
+      resetPlayer();
+      updateScore();
+      update(t);
+    });
+
+    // --- utilities: keyboard fallback for desktop testing ---
+    document.addEventListener('keydown', (e)=>{
+      if(e.code === 'ArrowLeft') playerMove(-1);
+      if(e.code === 'ArrowRight') playerMove(1);
+      if(e.code === 'ArrowDown') playerDrop(false);
+      if(e.code === 'ArrowUp') { rotatePlayer(1); }
+      if(e.code === 'Space') { playerDrop(true); }
+      draw();
+    });
+
+    // expose draw and resize for debug
+    window.tetris = { draw, resizeCanvas };
+
+  })();
+  </script>
+</body>
+</html>
